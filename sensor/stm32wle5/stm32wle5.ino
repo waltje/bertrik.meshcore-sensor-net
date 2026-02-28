@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <atomic>
 
 #include <Arduino.h>
 #include <EEPROM.h>
@@ -29,14 +30,14 @@ typedef struct {
 
 static MiniShell shell(&Serial);
 static STM32WLx radio = new STM32WLx_Module();
-static volatile bool rf_interrupt = false;
 static uint8_t rf_buffer[256];
 static nvdata_t nvdata;
 static uint8_t device_id[4];
+static std::atomic_bool rf_event {false};
 
 static void handle_radio_interrupt(void)
 {
-    rf_interrupt = true;
+    rf_event = true;
 }
 
 static bool lora_init(void)
@@ -212,10 +213,7 @@ void loop(void)
     shell.process(">", commands);
 
     // check radio
-    if (rf_interrupt) {
-        rf_interrupt = false;
-
-        // read interrupts
+    if (rf_event.exchange(false)) {
         uint32_t irq_status = radio.getIrqFlags();
 
         // handle receive
