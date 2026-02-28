@@ -2,6 +2,8 @@
 #include <stdbool.h>
 
 #include <Arduino.h>
+#include <EEPROM.h>
+
 #include <RadioLib.h>
 #include <MiniShell.h>
 #include <Crypto.h>
@@ -11,18 +13,25 @@
 
 // LoRa settings
 #define LORA_CARRIER_FREQ 869.618
-#define LORA_BANDWIDTH    62.5
-#define LORA_SF           8
-#define LORA_CR           8
-#define LORA_SYNC_WORD    0x12
-#define LORA_POWER        22
-#define LORA_PREAMBLE     16
-#define LORA_USE_CRC      true
+#define LORA_BANDWIDTH 62.5
+#define LORA_SF 8
+#define LORA_CR 8
+#define LORA_SYNC_WORD 0x12
+#define LORA_POWER 22
+#define LORA_PREAMBLE 16
+#define LORA_USE_CRC true
+
+// structure for non-volatile data, restored on bootup
+typedef struct {
+    uint8_t key[32];
+} nvdata_t;
 
 static MiniShell shell(&Serial);
 static STM32WLx radio = new STM32WLx_Module();
 static volatile bool rf_received = false;
 static uint8_t rf_buffer[256];
+static nvdata_t nvdata;
+static uint8_t device_id[4];
 
 static void set_rf_recv_flag(void)
 {
@@ -77,15 +86,9 @@ static void printhex(const char *title, const uint8_t *buf, size_t len)
 
 static int do_key(int argc, char *argv[])
 {
-    uint32_t deviceid = HAL_GetUIDw0() ^ HAL_GetUIDw1() ^ HAL_GetUIDw2();
-    uint8_t deviceid_buf[4];
-    deviceid_buf[0] = deviceid >> 24;
-    deviceid_buf[1] = deviceid >> 16;
-    deviceid_buf[2] = deviceid >> 8;
-    deviceid_buf[3] = deviceid >> 0;
     if (argc < 3) {
-        printf("Device id = 0x%08X\n", deviceid);
-        printhex("Device id", deviceid_buf, 4);
+        printhex("Device id:", device_id, sizeof(device_id));
+        printhex("Hash key:", nvdata.key, sizeof(nvdata.key));
         return 0;
     }
 
@@ -97,9 +100,14 @@ static int do_key(int argc, char *argv[])
     uint8_t device_key[32];
     blake.reset(secret, strlen(secret));
     blake.update(name, strlen(name));
-    blake.update(deviceid_buf, sizeof(deviceid_buf));
+    blake.update(device_id, sizeof(device_id));
     blake.finalize(device_key, 32);
     printhex("Key", device_key, 32);
+
+    // save nvdata to flash
+    memcpy(nvdata.key, device_key, 32);
+    EEPROM.put(0, nvdata);
+
     return 0;
 }
 
@@ -120,6 +128,20 @@ const cmd_t commands[] = {
 void setup(void)
 {
     Serial.begin(115200);
+    printf("\nSTM32WLE5 started\n");
+
+    // get device id
+    uint32_t deviceid = HAL_GetUIDw0() ^ HAL_GetUIDw1() ^ HAL_GetUIDw2();
+    device_id[0] = deviceid >> 24;
+    device_id[1] = deviceid >> 16;
+    device_id[2] = deviceid >> 8;
+    device_id[3] = deviceid >> 0;
+
+    // restore nvdata from flash
+    EEPROM.begin();
+    EEPROM.get(0, nvdata);
+
+    // init radio
     if (lora_init()) {
         radio.startReceive();
     } else {
