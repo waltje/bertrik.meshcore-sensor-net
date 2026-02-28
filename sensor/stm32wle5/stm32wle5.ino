@@ -24,18 +24,19 @@
 // structure for non-volatile data, restored on bootup
 typedef struct {
     uint8_t key[32];
+    uint32_t counter;
 } nvdata_t;
 
 static MiniShell shell(&Serial);
 static STM32WLx radio = new STM32WLx_Module();
-static volatile bool rf_received = false;
+static volatile bool rf_interrupt = false;
 static uint8_t rf_buffer[256];
 static nvdata_t nvdata;
 static uint8_t device_id[4];
 
-static void set_rf_recv_flag(void)
+static void handle_radio_interrupt(void)
 {
-    rf_received = true;
+    rf_interrupt = true;
 }
 
 static bool lora_init(void)
@@ -53,9 +54,19 @@ static bool lora_init(void)
     radio.explicitHeader();
     radio.setCRC(1);
     radio.invertIQ(false);
-    radio.setPacketReceivedAction(set_rf_recv_flag);
+    radio.setDio1Action(handle_radio_interrupt);
 
     return true;
+}
+
+static size_t put_u32(uint8_t *buf, uint32_t value)
+{
+    uint8_t *ptr = buf;
+    *ptr++ = value >> 24;
+    *ptr++ = value >> 16;
+    *ptr++ = value >> 8;
+    *ptr++ = value;
+    return ptr - buf;
 }
 
 static int do_init(int argc, char *argv[])
@@ -69,6 +80,48 @@ static int do_receive(int argc, char *argv[])
 {
     printf("Start receiving...\n");
     int16_t result = radio.startReceive();
+    return result;
+}
+
+static int do_send(int argc, char *argv[])
+{
+    BLAKE2s blake;
+    uint8_t buf[255];
+
+    if (argc < 2) {
+        return -1;
+    }
+    int len = atoi(argv[1]);
+    if (len >= sizeof(buf)) {
+        return -2;
+    }
+    printf("Sending %d bytes...\n", len);
+
+    // build payload
+    uint8_t *ptr = buf;
+    memcpy(ptr, device_id, 4);
+    ptr += 4;
+    ptr += put_u32(ptr, nvdata.counter++);
+    memset(ptr, len, len);
+    ptr += len;
+    blake.reset(nvdata.key, 32);
+    blake.update(buf, ptr - buf);
+    blake.finalize(ptr, 4);
+    ptr += 4;
+    int buf_len = ptr - buf;
+    printhex("Payload", buf, buf_len);
+
+    // build rf buffer
+    ptr = rf_buffer;
+    *ptr++ = (0x0 << 6) | (0xF << 2) | (0x1 << 0);      // version(0) | rawcustom(0xF) | flood (=1)
+    *ptr++ = 0;                 // path
+    memcpy(ptr, buf, buf_len);
+    ptr += buf_len;
+
+    // transmit
+    int rf_len = ptr - rf_buffer;
+    printhex("Transmit", rf_buffer, rf_len);
+    int16_t result = radio.startTransmit(rf_buffer, rf_len);
     return result;
 }
 
@@ -104,10 +157,8 @@ static int do_key(int argc, char *argv[])
     blake.finalize(device_key, 32);
     printhex("Key", device_key, 32);
 
-    // save nvdata to flash
+    // copy to nvdata
     memcpy(nvdata.key, device_key, 32);
-    EEPROM.put(0, nvdata);
-
     return 0;
 }
 
@@ -117,10 +168,21 @@ static int do_reboot(int argc, char *argv[])
     return 0;
 }
 
+static int do_save(int argc, char *argv[])
+{
+    printf("Saving ...");
+    // save nvdata to flash
+    EEPROM.put(0, nvdata);
+    printf("OK\n");
+    return 0;
+}
+
 const cmd_t commands[] = {
     { "init", do_init, "Initialise the radio" },
     { "receive", do_receive, "Start receiving" },
+    { "send", do_send, "<length> Send data payload" },
     { "key", do_key, "<name> <secret> Create key" },
+    { "save", do_save, "Save non-volatile data" },
     { "reboot", do_reboot, "Reboot" },
     { NULL, NULL, NULL }
 };
@@ -132,13 +194,9 @@ void setup(void)
 
     // get device id
     uint32_t deviceid = HAL_GetUIDw0() ^ HAL_GetUIDw1() ^ HAL_GetUIDw2();
-    device_id[0] = deviceid >> 24;
-    device_id[1] = deviceid >> 16;
-    device_id[2] = deviceid >> 8;
-    device_id[3] = deviceid >> 0;
+    put_u32(device_id, deviceid);
 
     // restore nvdata from flash
-    EEPROM.begin();
     EEPROM.get(0, nvdata);
 
     // init radio
@@ -154,11 +212,27 @@ void loop(void)
     shell.process(">", commands);
 
     // check radio
-    if (rf_received) {
-        int num_bytes = radio.getPacketLength();
-        int state = radio.readData(rf_buffer, num_bytes);
-        printf("Got %3d bytes, ", num_bytes);
-        printhex("data:", rf_buffer, num_bytes);
-        rf_received = false;
+    if (rf_interrupt) {
+        rf_interrupt = false;
+
+        // read interrupts
+        uint32_t irq_status = radio.getIrqFlags();
+
+        // handle receive
+        if (irq_status & RADIOLIB_SX126X_IRQ_RX_DONE) {
+            int num_bytes = radio.getPacketLength();
+            radio.readData(rf_buffer, num_bytes);
+            printf("Got %d bytes, ", num_bytes);
+            printhex("data:", rf_buffer, num_bytes);
+        }
+        // handle transmit
+        if (irq_status & RADIOLIB_SX126X_IRQ_TX_DONE) {
+            radio.finishTransmit();
+        }
+        // clear all interrupts
+        radio.clearIrqFlags(irq_status);
+
+        // restart receive
+        radio.startReceive();
     }
 }
