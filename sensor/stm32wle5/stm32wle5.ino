@@ -40,6 +40,7 @@ static nvdata_t nvdata;
 static uint8_t device_id[4];
 static std::atomic_bool rf_event {
 false};
+static int mc_routing = 2;
 
 static void handle_radio_interrupt(void)
 {
@@ -137,11 +138,31 @@ static int do_init(int argc, char *argv[])
     return 0;
 }
 
-static int do_receive(int argc, char *argv[])
+static int do_routing(int argc, char *argv[])
 {
-    printf("Start receiving...\n");
-    int16_t result = radio.startReceive();
-    return result;
+    if (argc == 2) {
+        mc_routing = atoi(argv[1]);
+    }
+    const char *desc;
+    switch (mc_routing) {
+    case 0:
+        desc = "TRANSPORT_FLOOD";
+        break;
+    case 1:
+        desc = "FLOOD";
+        break;
+    case 2:
+        desc = "DIRECT";
+        break;
+    case 3:
+        desc = "TRANSPORT_DIRECT";
+        break;
+    default:
+        desc = "unknown";
+        break;
+    }
+    printf("Routing mode set to %d (%s)\n", mc_routing, desc);
+    return 0;
 }
 
 static int do_data(int argc, char *argv[])
@@ -165,7 +186,7 @@ static int do_data(int argc, char *argv[])
 
     // build mc buffer
     uint8_t *ptr = rf_buffer;
-    *ptr++ = (0 << 6) | (6 << 2) | (2 << 0);    // version(0) | group data (0x6) | direct routing
+    *ptr++ = (0 << 6) | (6 << 2) | mc_routing;  // version(0) | group data (0x6)
     *ptr++ = 0;                 // path
     *ptr++ = nvdata.mc_channel_hash;
     ptr += encrypt(ptr, nvdata.mc_channel_key, buf, buf_len);
@@ -204,7 +225,7 @@ static int do_text(int argc, char *argv[])
 
     // build mc buffer
     ptr = rf_buffer;
-    *ptr++ = (0 << 6) | (5 << 2) | (2 << 0);    // version(0) | group text (0x5) | direct routing
+    *ptr++ = (0 << 6) | (5 << 2) | mc_routing;  // version(0) | group text (0x5)
     *ptr++ = 0;                 // path
     *ptr++ = nvdata.mc_channel_hash;
     ptr += encrypt(ptr, nvdata.mc_channel_key, buf, buf_len);
@@ -287,7 +308,7 @@ static int do_save(int argc, char *argv[])
 
 const cmd_t commands[] = {
     { "init", do_init, "Initialise the radio" },
-    { "receive", do_receive, "Start receiving" },
+    { "routing", do_routing, "<mode> Configure routing mode" },
     { "data", do_data, "<length> Send group data" },
     { "text", do_text, "[user] <text> Send group text" },
     { "key", do_key, "<app|mc> Get/set keys" },
@@ -328,7 +349,9 @@ void loop(void)
         if (irq_status & RADIOLIB_SX126X_IRQ_RX_DONE) {
             int num_bytes = radio.getPacketLength();
             radio.readData(rf_buffer, num_bytes);
-            printf("Got %d bytes, ", num_bytes);
+            int rssi = radio.getRSSI();
+            int snr = radio.getSNR();
+            printf("Got %d bytes (RSSI: %d, SNR: %d), ", num_bytes, rssi, snr);
             printhex("data:", rf_buffer, num_bytes);
         }
         // handle transmit
