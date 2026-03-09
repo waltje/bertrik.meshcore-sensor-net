@@ -47,6 +47,18 @@ static void handle_radio_interrupt(void)
     rf_event = true;
 }
 
+static void printhex(const char *title, const uint8_t *buf, size_t len, int rowsize = 16)
+{
+    printf("%s", title);
+    for (size_t i = 0; i < len; i++) {
+        if ((rowsize > 0) && (i % rowsize) == 0) {
+            printf("\n%04X:", i);
+        }
+        printf(" %02X", buf[i]);
+    }
+    printf("\n");
+}
+
 static bool lora_init(void)
 {
     radio.setRfSwitchPins(PA4, PA5);
@@ -129,6 +141,31 @@ static int build_payload(uint8_t *buf, const uint8_t *id, uint32_t counter, cons
     ptr += 4;
 
     return ptr - buf;
+}
+
+static void analyse(const uint8_t *data, int len)
+{
+    const uint8_t *ptr = data;
+    const char *payload_types[] =
+        { "REQ", "RESPONSE", "TXT_MSG", "ACK", "ADVERT", "GRP_TXT", "GRP_DATA", "ANON_REQ",
+        "PATH", "TRACE", "MULTIPART", "CONTROL", "rsvd", "rsvd", "rsvd", "RAW_CUSTOM"
+    };
+    const char *route_types[] = { "TRANSPORT_FLOOD", "FLOOD", "DIRECT", "TRANSPORT_DIRECT" };
+
+    printhex("Raw:", data, len, 0);
+    uint8_t header = *ptr++;
+    uint8_t payload_type = (header >> 2) & 0xF;
+    uint8_t route_type = header & 3;
+    printf("Header: %s, %s\n", payload_types[payload_type], route_types[route_type]);
+    uint8_t path_len = *ptr++;
+    if ((ptr + path_len) < (data + len)) {
+        printhex("Path:", ptr, data + len - ptr, 0);
+
+    }
+    ptr += path_len;
+    if (ptr < (data + len)) {
+        printhex("Payload:", ptr, data + len - ptr);
+    }
 }
 
 static int do_init(int argc, char *argv[])
@@ -237,18 +274,6 @@ static int do_text(int argc, char *argv[])
     return result;
 }
 
-static void printhex(const char *title, const uint8_t *buf, size_t len)
-{
-    printf("%s", title);
-    for (size_t i = 0; i < len; i++) {
-        if ((i % 16) == 0) {
-            printf("\n%04X:", i);
-        }
-        printf(" %02X", buf[i]);
-    }
-    printf("\n");
-}
-
 static int do_key(int argc, char *argv[])
 {
     if (argc > 1) {
@@ -283,11 +308,10 @@ static int do_key(int argc, char *argv[])
             printf("Need either 'app' or 'mc' argument.\n");
         }
     }
-    printhex("App device id:", device_id, sizeof(device_id));
-    printhex("App hash key:", nvdata.app_hashkey, sizeof(nvdata.app_hashkey));
-    printhex("MC channel key:", nvdata.mc_channel_key, sizeof(nvdata.mc_channel_key));
-    printf("MC channel hash: %02X\n", nvdata.mc_channel_hash);
-
+    printhex("App device id:", device_id, sizeof(device_id), 0);
+    printhex("App hash key:", nvdata.app_hashkey, sizeof(nvdata.app_hashkey), 0);
+    printhex("MC channel key:", nvdata.mc_channel_key, sizeof(nvdata.mc_channel_key), 0);
+    printhex("App device id:", &nvdata.mc_channel_hash, 1, 0);
     return 0;
 }
 
@@ -351,8 +375,8 @@ void loop(void)
             radio.readData(rf_buffer, num_bytes);
             int rssi = radio.getRSSI();
             int snr = radio.getSNR();
-            printf("Got %d bytes (RSSI: %d, SNR: %d), ", num_bytes, rssi, snr);
-            printhex("data:", rf_buffer, num_bytes);
+            printf("### Got %d bytes (RSSI: %d, SNR: %d), ", num_bytes, rssi, snr);
+            analyse(rf_buffer, num_bytes);
         }
         // handle transmit
         if (irq_status & RADIOLIB_SX126X_IRQ_TX_DONE) {
