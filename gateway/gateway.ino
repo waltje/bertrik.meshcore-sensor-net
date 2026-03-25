@@ -5,8 +5,13 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 
+#include <ESPAsyncWiFiManager.h>
+#include <ESPmDNS.h>
+
 #include <RadioLib.h>
 #include <MiniShell.h>
+
+#include "config.h"
 
 #define printf Serial.printf
 
@@ -19,6 +24,10 @@
 #define LORA_POWER 22
 #define LORA_PREAMBLE 16
 #define LORA_USE_CRC true
+
+static DNSServer dns;
+static AsyncWebServer server(80);
+static AsyncWiFiManager wifiManager(&server, &dns);
 
 static MiniShell shell(&Serial);
 static SX1262 radio = new Module(41, 39, 42, 40);
@@ -69,8 +78,21 @@ static int do_reboot(int argc, char *arg[])
     return 0;
 }
 
+static int do_datetime(int argc, char *argv[])
+{
+    time_t now = time(NULL);
+    struct tm *info = localtime(&now);
+
+    char buf[20];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", info);
+    printf("Date/time is now %s\n", buf);
+
+    return 0;
+}
+
 const cmd_t commands[] = {
     { "reboot", do_reboot, "Reboot" },
+    { "datetime", do_datetime, "Show current date/time" },
     { NULL, NULL, NULL }
 };
 
@@ -79,16 +101,47 @@ void setup(void)
     Serial.begin(115200);
     printf("Hello gateway!\n");
 
+    wifiManager.autoConnect("meshcore-gw");
+
+    // NTP
+    configTzTime("CET-1CEST,M3.5.0/02,M10.5.0/03", "nl.pool.ntp.org");
+
     printf("lora_init()...");
     if (!lora_init()) {
         printf("FAILED!\n");
     } else {
         printf("OK!\n");
     }
+
+    LittleFS.begin(true);
+
+    // load settings, save defaults if necessary
+    config_begin(LittleFS, "/config.json");
+    if (!config_load()) {
+        config_set_value("mqtt_broker_host", "stofradar.nl");
+        config_set_value("mqtt_broker_port", "1883");
+        config_set_value("mqtt_user", "");
+        config_set_value("mqtt_pass", "");
+        config_set_value("mqtt_topic", "");
+        config_set_value("lora_freq", "869.618");
+        config_set_value("lora_bw", "62.5");
+        config_set_value("lora_sf", "8");
+        config_set_value("lora_cr", "8");
+        config_set_value("lora_sync", "12");
+        config_save();
+    }
+    config_serve(server, "/config", "/config.html");
+    server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
+
+    server.begin();
+
+    MDNS.begin("meshcore-gw");
+    MDNS.addService("_http", "_tcp", 80);
 }
 
 void loop(void)
 {
+    // handle shell
     shell.process(">", commands);
 
     // check radio
